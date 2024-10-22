@@ -1,4 +1,11 @@
 # Chicken-Disease-Classification--Project
+The Chicken Disease Classification Project utilizes deep learning to identify and classify diseases in chickens from images. By employing advanced image processing and deep learning techniques, the project aims to assist poultry farmers in early diagnosis, promoting timely interventions for better flock health. Ultimately, it enhances decision-making and contributes to improved animal welfare and productivity in the poultry industry.
+
+
+
+
+
+
 
 
 ## Workflows  
