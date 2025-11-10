@@ -30,8 +30,8 @@ jobs:
       - name: Prepare reports directory
         run: mkdir -p "$REPORT_DIR"
 
-      - name: Install Semgrep
-        run: python3 -m pip install --upgrade pip && pip install "semgrep>=1.36.0"
+      - name: Install Semgrep, Pyre, Bandit
+        run: python3 -m pip install --upgrade pip && pip install "semgrep>=1.36.0" pyre-check bandit
 
       - name: Semgrep scan
         run: semgrep ci --config p/owasp-top-ten --sarif --output "$REPORT_DIR/semgrep.sarif" || true
@@ -105,6 +105,27 @@ jobs:
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: ${{ env.REPORT_DIR }}/checkov.sarif
+
+      - name: Pyre check
+        if: ${{ hashFiles('.pyre_configuration') != '' || hashFiles('.pyre_configuration.local') != '' }}
+        run: pyre --noninteractive --output=json check 2>&1 | tee ${{ env.REPORT_DIR }}/pyre.json || true
+
+      - name: Upload Pyre findings
+        if: ${{ hashFiles('reports/pyre.json') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: pyre.json
+          path: ${{ env.REPORT_DIR }}/pyre.json
+
+      - name: Bandit
+        continue-on-error: true
+        run: bandit -r . -f sarif -o ${{ env.REPORT_DIR }}/bandit.sarif
+
+      - name: Upload Bandit SARIF
+        if: ${{ hashFiles('reports/bandit.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ env.REPORT_DIR }}/bandit.sarif
 
   dast:
     if: ${{ github.event.inputs.target_url != '' }}
