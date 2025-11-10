@@ -1,0 +1,117 @@
+name: Security Scan
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: "Optional target URL for DAST"
+        required: false
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  semgrep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: returntocorp/semgrep-action@v1
+        with:
+          config: p/owasp-top-ten
+          generateSarif: "true"
+          sarifOutput: semgrep.sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        with:
+          args: detect --report-format sarif --report-path gitleaks.sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: gitleaks.sarif
+
+  osv_scanner:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google/osv-scanner-action@v1
+        with:
+          scan-args: >-
+            --format sarif
+            --output osv.sarif
+            .
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: osv.sarif
+
+  trivy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build container (optional)
+        run: |
+          if [ -f Dockerfile ]; then docker build -t app:ci .; fi
+      - uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs,config,rootfs
+          image-ref: app:ci
+          format: sarif
+          output: trivy.sarif
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH,MEDIUM
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy.sarif
+
+  checkov:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bridgecrewio/checkov-action@master
+        with:
+          directory: .
+          output_format: sarif
+          output_file_path: checkov.sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: checkov.sarif
+
+  dast:
+    needs: [semgrep, gitleaks, osv_scanner, trivy, checkov]
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.target_url != '' }}
+    steps:
+      - name: ZAP Baseline
+        uses: zaproxy/action-baseline@v0.13.0
+        with:
+          target: ${{ github.event.inputs.target_url }}
+          rules_file_name: .zap/rules.tsv
+          cmd_options: -a -m 5
+      - name: Upload ZAP report
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-baseline-html
+          path: report_html.html
+      - name: Run Nuclei
+        uses: projectdiscovery/actions/nuclei@v2
+        with:
+          args: >-
+            -u "${{ github.event.inputs.target_url }}"
+            -severity critical,high,medium
+            -o nuclei.txt
+      - name: Upload nuclei findings
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuclei-findings
+          path: nuclei.txt
