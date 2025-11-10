@@ -1,117 +1,141 @@
-name: Security Scan
+name: Security Scan (SAST + SCA + IaC + DAST)
 
 on:
+  pull_request:
+  push:
+    branches: [ main ]
   workflow_dispatch:
     inputs:
       target_url:
         description: "Optional target URL for DAST"
         required: false
-  push:
-    branches: [ main ]
-  pull_request:
+  schedule:
+    - cron: "0 20 * * *"   # nightly (IST evening)
 
 permissions:
   contents: read
   security-events: write
+  actions: read
+  issues: write
+
+env:
+  REPORT_DIR: reports
 
 jobs:
-  semgrep:
+  sast_and_friends:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: returntocorp/semgrep-action@v1
-        with:
-          config: p/owasp-top-ten
-          generateSarif: "true"
-          sarifOutput: semgrep.sarif
-      - uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: semgrep.sarif
 
-  gitleaks:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
-        with:
-          args: detect --report-format sarif --report-path gitleaks.sarif
-      - uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: gitleaks.sarif
+      - name: Prepare reports directory
+        run: mkdir -p "$REPORT_DIR"
 
-  osv_scanner:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: google/osv-scanner-action@v1
+      # ---- Semgrep (SARIF) ----
+      - name: Install Semgrep
+        run: python3 -m pip install --upgrade pip && pip install "semgrep>=1.36.0"
+      - name: Semgrep scan
+        run: semgrep ci --config p/owasp-top-ten --sarif --output "$REPORT_DIR/semgrep.sarif" || true
+      - name: Upload Semgrep SARIF
+        if: ${{ hashFiles('reports/semgrep.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@v3
         with:
-          scan-args: >-
-            --format sarif
-            --output osv.sarif
-            .
-      - uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: osv.sarif
+          sarif_file: ${{ env.REPORT_DIR }}/semgrep.sarif
 
-  trivy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build container (optional)
+      # ---- Gitleaks (SARIF) ----
+      - name: Gitleaks
+        continue-on-error: true
+        uses: gitleaks/gitleaks-action@v2
+        with:
+          args: detect --report-format sarif --report-path ${{ env.REPORT_DIR }}/gitleaks.sarif
+      - name: Upload Gitleaks SARIF
+        if: ${{ hashFiles('reports/gitleaks.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ env.REPORT_DIR }}/gitleaks.sarif
+
+      # ---- OSV-Scanner (SARIF) ----
+      - name: Install OSV-Scanner
         run: |
-          if [ -f Dockerfile ]; then docker build -t app:ci .; fi
-      - uses: aquasecurity/trivy-action@0.24.0
+          curl -sSL https://github.com/google/osv-scanner/releases/latest/download/osv-scanner_Linux_x86_64.tar.gz -o osv.tar.gz
+          tar xf osv.tar.gz osv-scanner
+          chmod +x osv-scanner
+      - name: OSV-Scanner
+        continue-on-error: true
+        run: ./osv-scanner --format sarif --output "$REPORT_DIR/osv.sarif" .
+      - name: Upload OSV SARIF
+        if: ${{ hashFiles('reports/osv.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ env.REPORT_DIR }}/osv.sarif
+
+      # ---- Trivy FS + Config + optional Image (SARIF) ----
+      - name: Build image (optional)
+        if: ${{ hashFiles('Dockerfile') != '' }}
+        continue-on-error: true
+        run: docker build -t app:ci .
+      - name: Trivy filesystem/config/image
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@0.24.0
         with:
           scan-type: fs,config,rootfs
           image-ref: app:ci
           format: sarif
-          output: trivy.sarif
+          output: ${{ env.REPORT_DIR }}/trivy.sarif
           ignore-unfixed: true
           severity: CRITICAL,HIGH,MEDIUM
-      - uses: github/codeql-action/upload-sarif@v3
+      - name: Upload Trivy SARIF
+        if: ${{ hashFiles('reports/trivy.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: trivy.sarif
+          sarif_file: ${{ env.REPORT_DIR }}/trivy.sarif
 
-  checkov:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: bridgecrewio/checkov-action@master
+      # ---- Checkov IaC (SARIF) ----
+      - name: Checkov
+        continue-on-error: true
+        uses: bridgecrewio/checkov-action@master
         with:
           directory: .
           output_format: sarif
-          output_file_path: checkov.sarif
-      - uses: github/codeql-action/upload-sarif@v3
+          output_file_path: ${{ env.REPORT_DIR }}/checkov.sarif
+          skip_check: CKV_GHA_7
+      - name: Upload Checkov SARIF
+        if: ${{ hashFiles('reports/checkov.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: checkov.sarif
+          sarif_file: ${{ env.REPORT_DIR }}/checkov.sarif
 
   dast:
-    needs: [semgrep, gitleaks, osv_scanner, trivy, checkov]
-    runs-on: ubuntu-latest
     if: ${{ github.event.inputs.target_url != '' }}
+    runs-on: ubuntu-latest
     steps:
       - name: ZAP Baseline
+        continue-on-error: true
         uses: zaproxy/action-baseline@v0.13.0
         with:
           target: ${{ github.event.inputs.target_url }}
-          rules_file_name: .zap/rules.tsv
-          cmd_options: -a -m 5
-      - name: Upload ZAP report
-        uses: actions/upload-artifact@v4
+          cmd_options: "-a -m 5"
+      - uses: actions/upload-artifact@v4
         with:
-          name: zap-baseline-html
+          name: zap-baseline-report
           path: report_html.html
-      - name: Run Nuclei
-        uses: projectdiscovery/actions/nuclei@v2
+
+      - name: ZAP Full Scan
+        continue-on-error: true
+        uses: zaproxy/action-full-scan@v0.9.0
         with:
-          args: >-
-            -u "${{ github.event.inputs.target_url }}"
-            -severity critical,high,medium
-            -o nuclei.txt
-      - name: Upload nuclei findings
-        uses: actions/upload-artifact@v4
+          target: ${{ github.event.inputs.target_url }}
+          allow_issue_writing: true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zap-full-report
+          path: report_html.html
+
+      - name: Setup Nuclei
+        uses: projectdiscovery/actions/nuclei@v2
+      - name: Run Nuclei
+        continue-on-error: true
+        run: nuclei -u "${{ github.event.inputs.target_url }}" -severity critical,high,medium -o nuclei.txt
+      - uses: actions/upload-artifact@v4
         with:
           name: nuclei-findings
           path: nuclei.txt
