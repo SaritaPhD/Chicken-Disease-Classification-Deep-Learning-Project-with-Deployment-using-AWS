@@ -130,7 +130,7 @@ jobs:
           path: report_html.html
 
       - name: Setup Nuclei
-        uses: projectdiscovery/actions/nuclei@v2
+        uses: projectdiscovery/nuclei-action@v2
       - name: Run Nuclei
         continue-on-error: true
         run: nuclei -u "${{ github.event.inputs.target_url }}" -severity critical,high,medium -o nuclei.txt
